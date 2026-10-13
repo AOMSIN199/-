@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Love Heart</title>
+<style>
+  :root { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:#060208; overflow:hidden; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; touch-action:manipulation; }
+  #hint { position:fixed; left:0; right:0; bottom:calc(14px + env(safe-area-inset-bottom, 0px));
+          text-align:center; color:rgba(255,255,255,.35); font:13px system-ui, "Noto Sans Thai", sans-serif; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="s"></canvas><canvas id="d"></canvas>
+<div id="hint">แตะหน้าจอเพื่อวาดใหม่</div>
+<script>
+(function () {
+  var PHR = ["รักนะ"];
+  var SIZES = [9,10,11,12], SC = 21, DURATION = 10000, ANIM = 42, LIFT = 34, GAP = 7;
+  var BGC = [6/255, 2/255, 8/255], FLASH = [1, .78, .78];
+  var FONT = "Arial,'Noto Sans','Noto Sans Thai','Noto Sans CJK JP','Noto Sans KR','Noto Sans Devanagari',sans-serif";
+  var sc = document.getElementById("s"), dc = document.getElementById("d");
+  var sx = sc.getContext("2d"), dx = dc.getContext("2d");
+  var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var W, H, k, fm, S, EDGES, YMAX, YMIN, CY, ORDER, idx, acc, active, spawning, shim, raf, last, nextShim, finished;
+
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v) { return Math.max(0, Math.min(1, v)); }
+  function mix(a, b, t) { return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+  function dim(c, t) { return [c[0]*t, c[1]*t, c[2]*t]; }
+  function hx(c) { return "rgb(" + Math.round(clamp(c[0])*255) + "," + Math.round(clamp(c[1])*255) + "," + Math.round(clamp(c[2])*255) + ")"; }
+  function heart(a, s) {
+    var x = 16 * Math.pow(Math.sin(a), 3);
+    var y = 13*Math.cos(a) - 5*Math.cos(2*a) - 2*Math.cos(3*a) - Math.cos(4*a);
+    return [x * s, y * s];
+  }
+  function spans(y) {
+    var xs = [];
+    for (var i = 0; i < EDGES.length; i++) {
+      var e = EDGES[i], x1 = e[0][0], y1 = e[0][1], x2 = e[1][0], y2 = e[1][1];
+      if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) xs.push(x1 + (y - y1) * (x2 - x1) / (y2 - y1));
+    }
+    xs.sort(function (a, b) { return a - b; });
+    var out = [];
+    for (var j = 0; j + 1 < xs.length; j += 2) out.push([xs[j], xs[j+1]]);
+    return out;
+  }
+  function intersect(A, B) {
+    var out = [];
+    A.forEach(function (a) { B.forEach(function (b) {
+      var lo = Math.max(a[0], b[0]), hi = Math.min(a[1], b[1]);
+      if (hi - lo > 14 * k) out.push([lo, hi]);
+    }); });
+    return out;
+  }
+  function setFont(ctx, size) { ctx.font = "700 " + size + "px " + FONT; }
+  function txt(ctx, t, x, y, size, col) { setFont(ctx, size); ctx.fillStyle = hx(col); ctx.fillText(t, x, y); }
+
+  var queue = [];
+  function nextPhrase() {
+    if (!queue.length) { queue = PHR.slice(); for (var i = queue.length - 1; i > 0; i--) { var j = Math.floor(Math.random()*(i+1)); var t = queue[i]; queue[i] = queue[j]; queue[j] = t; } }
+    return queue.pop();
+  }
+
+  function setup() {
+    W = window.innerWidth; H = window.innerHeight;
+    var dpr = Math.min(window.devicePixelRatio || 1, 3);
+    [sc, dc].forEach(function (c) { c.width = W*dpr; c.height = H*dpr; });
+    [sx, dx].forEach(function (c) { c.setTransform(dpr,0,0,dpr,0,0); c.textAlign = "center"; c.textBaseline = "middle"; });
+    var unit = [], i;
+    for (i = 0; i < 720; i++) unit.push(heart(2*Math.PI*i/720, 1));
+    var uy = unit.map(function (p) { return p[1]; });
+    var hUnit = Math.max.apply(null, uy) - Math.min.apply(null, uy);
+    S = Math.min(W * 0.92 / 32, H * 0.78 / hUnit);
+    k = S / SC;
+    fm = k < 1 ? Math.min(1, k * 1.5) : k;
+    var poly = [];
+    for (i = 0; i < 720; i++) poly.push(heart(2*Math.PI*i/720, S));
+    EDGES = poly.map(function (p, n) { return [p, poly[(n+1) % poly.length]]; });
+    var ys = poly.map(function (p) { return p[1]; });
+    YMAX = Math.max.apply(null, ys); YMIN = Math.min.apply(null, ys); CY = (YMAX + YMIN) / 2;
+  }
+
+  function build() {
+    var placed = [], rowH = 12 * fm * 1.25 + 4 * k, half = rowH / 2;
+    for (var y = YMAX - half; y > YMIN + half; y -= rowH) {
+      intersect(spans(y + half), spans(y - half)).forEach(function (seg) {
+        var lo = seg[0] + 4*k, hi = seg[1] - 4*k, cur = lo + rnd(0, 8) * k, line = [];
+        while (true) {
+          var fit = null;
+          for (var t = 0; t < 10; t++) {
+            var text = nextPhrase(), size = SIZES[Math.floor(Math.random()*4)] * fm;
+            setFont(sx, size);
+            var w = sx.measureText(text).width;
+            if (cur + w <= hi) { fit = [text, size, w]; break; }
+          }
+          if (!fit) break;
+          line.push([cur + fit[2]/2, fit[0], fit[1], fit[2]]);
+          cur += fit[2] + GAP * fm;
+        }
+        if (!line.length) return;
+        if (line.length > 1) {
+          var left = hi - (line[line.length-1][0] + line[line.length-1][3]/2);
+          line.forEach(function (it, i) { it[0] += left * i / (line.length - 1); });
+        } else line[0][0] = (lo + hi) / 2;
+        line.forEach(function (it, i) {
+          placed.push({ x: it[0], y: y, text: it[1], size: it[2], edge: i === 0 || i === line.length - 1 });
+        });
+      });
+    }
+    var wine = [.58, 0, .09], crimson = [.9, .05, .14], blood = [.98, .1, .16];
+    placed.forEach(function (p) {
+      p.rad = Math.min(1, Math.hypot(p.x / (16*S), (p.y - CY) / (14.5*S)));
+      var base = mix(wine, crimson, .25 + .75 * p.rad);
+      base = mix(base, blood, rnd(0, .35) + (p.edge ? .3 : 0));
+      p.color = base.map(function (v) { return Math.min(1, v); });
+      p.X = W/2 + p.x; p.Y = H/2 + (CY - p.y);
+    });
+    var edges = placed.filter(function (p) { return p.edge; }), inner = placed.filter(function (p) { return !p.edge; });
+    edges.sort(function (a, b) { return (Math.atan2(a.x, a.y-CY) + 4*Math.PI) % (2*Math.PI) - (Math.atan2(b.x, b.y-CY) + 4*Math.PI) % (2*Math.PI); });
+    inner.forEach(function (p) { p.key = -p.rad + rnd(0, .08); });
+    inner.sort(function (a, b) { return a.key - b.key; });
+    return edges.concat(inner);
+  }
+
+  function drawFinal(p) {
+    txt(sx, p.text, p.X + 2*k, p.Y + 3*k, p.size, dim(p.color, .3));
+    txt(sx, p.text, p.X, p.Y, p.size + 1, dim(p.color, .2));
+    txt(sx, p.text, p.X, p.Y, p.size, p.color);
+  }
+
+  function frame(now) {
+    var ticks = Math.min(4, (now - last) / 16); last = now;
+    if (spawning) {
+      acc += ORDER.length / (DURATION / 16) * ticks;
+      while (acc >= 1 && idx < ORDER.length) { acc--; var p = ORDER[idx++]; p.f = 0; p.dx = rnd(-10, 10) * k; active.push(p); }
+      if (idx >= ORDER.length) spawning = false;
+    }
+    dx.clearRect(0, 0, W, H);
+    active = active.filter(function (p) {
+      p.f += ticks;
+      var u = clamp(p.f / ANIM), e = 1 - Math.pow(1 - u, 3), c = p.color;
+      if (u >= 1) { drawFinal(p); return false; }
+      var px = p.X + p.dx * (1 - e), py = p.Y - (1 - e) * LIFT * k;
+      txt(dx, p.text, p.X + 2*k, p.Y + 3*k, p.size, mix(BGC, dim(c, .3), e));
+      txt(dx, p.text, px, py, p.size + 1, mix(BGC, dim(c, .2), e * e));
+      var flash = .75 * Math.sin(Math.PI * clamp((u - .55) / .45));
+      txt(dx, p.text, px, py, p.size, mix(mix(BGC, c, Math.pow(e, 1.5)), FLASH, flash));
+      return true;
+    });
+    if (!spawning && !active.length) {
+      if (now > nextShim) { shim.push({ p: ORDER[Math.floor(Math.random()*ORDER.length)], until: now + 260 }); nextShim = now + 140; }
+      shim = shim.filter(function (s) { return s.until > now; });
+      shim.forEach(function (s) { txt(dx, s.p.text, s.p.X, s.p.Y, s.p.size, mix(s.p.color, FLASH, .6)); });
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    cancelAnimationFrame(raf);
+    setup(); ORDER = build();
+    sx.clearRect(0, 0, W, H); dx.clearRect(0, 0, W, H);
+    if (reduce) { ORDER.forEach(drawFinal); return; }
+    idx = 0; acc = 0; active = []; shim = []; spawning = true; nextShim = 0;
+    last = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+  dc.addEventListener("click", start);
+  var tm; window.addEventListener("resize", function () { clearTimeout(tm); tm = setTimeout(start, 250); });
+  start();
+})();
+</script>
+</body>
+</html>
